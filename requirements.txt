@@ -1,0 +1,2 @@
+IMAPClient==0.9.1
+keyring==0.10
