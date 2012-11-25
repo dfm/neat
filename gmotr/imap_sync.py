@@ -14,7 +14,9 @@ import imaplib
 import sqlite3
 import logging
 import StringIO
+import getpass
 import curses
+import socket
 
 import keyring
 
@@ -36,6 +38,13 @@ class GmailAccount(object):
     """
     An Gmail account that is to be synced locally.
 
+    :param email_address:
+        The Gmail email address for the account.
+
+    :param maildir: (optional)
+        The path to the Maildir local repository. It will be created if
+        it doesn't already exist.
+
     """
 
     parse_uid = re.compile(r"UID ([0-9]*)")
@@ -47,10 +56,56 @@ class GmailAccount(object):
     parse_labels = re.compile(r"")
     parse_labels = re.compile(r"(\"(?:.*?)\"|(?:.+?(?:\s|\Z)))")
 
-    def __init__(self, email, password, maildir):
-        self._imap = IMAPConnection(email, password)
+    def __init__(self, email_address, maildir=None):
+        self._email = email_address
+        self._password = None
+        self._imap = IMAPConnection(self._email, self.get_password())
+
+        success = False
+        while not success:
+            # Check the login credentials.
+            print(u"Checking IMAP credentials...", end=" ")
+            try:
+                with self._imap as c:
+                    pass
+
+            except imaplib.IMAP4.error as e:
+                # Probably an authentication error.
+                msg = str(e)
+                t = re.findall(u"\[(.*?)\]", msg)
+
+                if len(t) == 0:
+                    raise
+
+                if t[0] == u"AUTHENTICATIONFAILED":
+                    print(u"Failed: authentication error.\n\n"
+                        u"Your credentials seem to be wrong. "
+                        u"Make sure that IMAP is enabled for your Gmail "
+                        u"account and try again.\n")
+
+                    self._imap = IMAPConnection(self._email,
+                                                self.get_password(force=True))
+
+                else:
+                    raise
+
+            except socket.error as e:
+                # Network problems.
+                print(u"Failed: network error.\n\n"
+                    u"Make sure that you're connected to the internet and try "
+                    u"again.")
+                sys.exit(1)
+
+            else:
+                print(u"Success.\n")
+                success = True
 
         # Initialize the Maildir.
+        if maildir is None:
+            maildir = os.path.expanduser(os.path.join(u"~",
+                                                      u".gmotr",
+                                                      u"mail",
+                                                      self._email))
         self._maildir = maildir
 
         # Initialize the database back end.
@@ -80,18 +135,35 @@ class GmailAccount(object):
             c.execute(u"""CREATE VIRTUAL TABLE IF NOT EXISTS contents
                  USING FTS3(mail_from, mail_to, cc, bcc, subject, body)""")
 
-    def _folders(self, connection):
-        folders = []
-        code, data = connection.list()
-        if code != "OK":
-            raise IMAPSyncError(u"LIST responded with: '{0}'".format(code))
+    def get_password(self, force=False):
+        pw = None
 
-        for spec in data:
-            folders.append(IMAPFolder(spec))
+        if not force:
+            if self._password is not None:
+                return self._password
+            pw = keyring.get_password(u"gmotr", self._email)
 
-        return folders
+        if pw is None:
+            pw = getpass.getpass(u"Password for {0}: ".format(self._email))
+            f = raw_input(u"Save password in key chain? [Y/n] ")
+            if f in [u"Y", u"y", u""]:
+                keyring.set_password(u"gmotr", self._email, pw)
+
+        return pw
 
     def _fetch(self, mb, mbname):
+        """
+        Synchronize the local repository with the remote one. NOTE: this is a
+        *read-only* operation.
+
+        :param mb:
+            The name of the mailbox in remote repository (e.g.
+            ``'[Gmail]/All Mail'``).
+
+        :param mbname:
+            A file-system friendly name for the mailbox (e.g. ``archive``).
+
+        """
         # Determine the last_ UID that was fetched for this mailbox.
         with self._db as c:
             last_uid = c.execute(u"""SELECT max(uid) FROM messages
@@ -152,7 +224,7 @@ class GmailAccount(object):
                                  + u"in mailbox: '{0}'\n".format(mb))
 
                 # Show the progress bar.
-                sys.stdout.write(u"| " + u"|" * nfilled
+                sys.stdout.write(u"| " + u"*" * nfilled
                                  + u"-" * (nbars - nfilled) + u" | ")
 
                 # Compute and display the approximate time remaining.
@@ -403,7 +475,6 @@ class IMAPDB(object):
 
 
 if __name__ == "__main__":
-    e = "foreman.mackey@gmail.com"
-    a = GmailAccount(e, keyring.get_password("gob", e),
-                     os.path.expanduser("~/.gmotr/mail"))
+    e = raw_input(u"Your email address: ")
+    a = GmailAccount(e)
     a.fetch_all()
