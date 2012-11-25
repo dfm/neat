@@ -52,11 +52,13 @@ class GmailAccount(object):
     parse_x_gm_thrid = re.compile(r"X-GM-THRID ([0-9]*)")
     parse_x_gm_labels = re.compile(r"X-GM-LABELS \((.*?)\)")
     parse_flags = re.compile(r"FLAGS \((.*?)\)")
+    parse_internaldate = re.compile(r"INTERNALDATE \"(.*?)\"")
+    parse_header = re.compile(r"(.*?)\: (?P<from_>.*?)$", re.M | re.S)
 
     parse_labels = re.compile(r"")
     parse_labels = re.compile(r"(\"(?:.*?)\"|(?:.+?(?:\s|\Z)))")
 
-    def __init__(self, email_address, maildir=None):
+    def __init__(self, email_address):
         self._email = email_address
         self._password = None
         self._imap = IMAPConnection(self._email, self.get_password())
@@ -67,7 +69,7 @@ class GmailAccount(object):
             print(u"Checking IMAP credentials...", end=" ")
             try:
                 with self._imap as c:
-                    pass
+                    c
 
             except imaplib.IMAP4.error as e:
                 # Probably an authentication error.
@@ -100,6 +102,7 @@ class GmailAccount(object):
                 print(u"Success.\n")
                 success = True
 
+    def sync_setup(self, maildir=None):
         # Initialize the Maildir.
         if maildir is None:
             maildir = os.path.expanduser(os.path.join(u"~",
@@ -150,6 +153,50 @@ class GmailAccount(object):
                 keyring.set_password(u"gmotr", self._email, pw)
 
         return pw
+
+    def simple_list(self, q=None):
+        with self._imap as c:
+            # Select the IMAP mailbox.
+            if q is None:
+                code, count = c.select("INBOX", readonly=True)
+                if code != u"OK":
+                    raise IMAPSyncError(u"Couldn't SELECT 'INBOX' ({1})"
+                                        .format(code))
+
+                uids = u"1:*"
+            else:
+                code, count = c.select("[Gmail]/All Mail", readonly=True)
+
+                code, uids = c.uid(u"search", None,
+                                   u"X-GM-RAW", u"\"{0}\"".format(q))
+                uids = u",".join(uids[0].split())
+                if code != u"OK":
+                    raise IMAPSyncError(u"Couldn't run query '{0}' ({1})"
+                                        .format(q, code))
+
+            code, data = c.uid(u"fetch", uids,
+                               u"(BODY.PEEK[HEADER.FIELDS "
+                               u"(Subject From To)] "
+                               u"X-GM-MSGID X-GM-THRID X-GM-LABELS "
+                               u"FLAGS INTERNALDATE)")
+
+            if code != "OK":
+                raise IMAPSyncError(u"Couldn't FETCH flags.")
+
+            results = []
+            for d in data:
+                if d != u")":
+                    doc = dict(zip(
+                            [u"msgid", u"thrid", u"labels", u"flags", u"uid"],
+                            self._do_header_parse(d[0])))
+                    for k, val in self.parse_header.findall(d[1]):
+                        doc[k.strip().lower()] = val.strip()
+
+                    doc["time"] = time.mktime(imaplib.Internaldate2tuple(d[0]))
+
+                    results.append(doc)
+
+            return sorted(results, reverse=True, key=lambda d: d["time"])
 
     def _fetch(self, mb, mbname):
         """
@@ -332,7 +379,7 @@ class GmailMessage(object):
         self.msg = email.message_from_string(msg)
 
         # Extract and format the relevant fields.
-        self.subject = u" ".join(self.msg.get_all(u"subject", u""))
+        self.subject = " ".join(self.msg.get_all(u"subject", u""))
         self.sender = self.msg.get(u"from")
         self.to = u", ".join(self.msg.get_all(u"to", u""))
         self.cc = u", ".join(self.msg.get_all(u"cc", u""))
