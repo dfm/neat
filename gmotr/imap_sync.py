@@ -1,3 +1,9 @@
+# vim: set fileencoding=utf-8 :
+
+from __future__ import print_function
+
+__all__ = ["GmailAccount"]
+
 import os
 import re
 import sys
@@ -9,7 +15,6 @@ import sqlite3
 import logging
 import StringIO
 import curses
-import datetime
 
 import keyring
 
