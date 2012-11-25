@@ -1,5 +1,10 @@
 # vim: set fileencoding=utf-8 :
 
+
+import locale
+locale.setlocale(locale.LC_ALL, "")
+code = locale.getpreferredencoding()
+
 import re
 import curses
 import textwrap
@@ -79,23 +84,22 @@ class MessageInfo(object):
             cs = u"utf-8"
         s += unicode(v.strip(), cs)
 
-        s = s.encode(u"ascii", u"replace")
-
         # Parse the date.
         date = datetime.utcfromtimestamp(self.doc.get(u"time")) \
                         .replace(tzinfo=UTC()).astimezone(LocalTimezone())
         dt = datetime.now(UTC()) - date
 
         if dt.days == 0 and dt.seconds < 43200:
-            date = date.strftime(u"%I:%M %p").lower().encode(u"ascii")
+            date = date.strftime(u"%I:%M %p").lower()
             if date[0] == u"0":
                 date = date[1:]
         else:
-            date = date.strftime(u"%b %d").encode(u"ascii")
+            date = date.strftime(u"%b %d")
 
         # Compute the layout.
         size = width - 2 - len(date)
-        return "{{0:{0}s}} {{1}}".format(size).format(s[:size], date)
+        return (u"{{0:{0}s}} {{1}}".format(size).format(s[:size], date)) \
+                .encode(code)
 
     @property
     def color(self):
@@ -115,21 +119,52 @@ class MessageDetail(object):
     def to_str(self, width):
         msg = self.doc.get(u"message", u"")
 
+        # Iterate through the parts and deal with encodings.
         s = u""
+        charsets = msg.get_charsets()
         for i, p in enumerate(msg.walk()):
             ct = p.get_content_type()
             if ct == "text/plain":
-                s += unicode(p.get_payload(decode=True), errors="replace")
+                cs = charsets[i]
+                if cs is None:
+                    cs = u"utf-8"
+                s += unicode(p.get_payload(decode=True), cs)
                 s += u"\n\n"
 
             elif u"multipart" not in ct:
                 s += u"=== Part {0}: Content-type: {1} ===\n\n\n".format(i + 1,
                                                                         ct)
 
-        s = u"\n".join([u"\n".join(textwrap.wrap(l, width - 1))
-                       for l in s.split(u"\n")])
+        r = []
 
-        return s.encode("ascii", "replace")
+        # Build the header.
+        for k in [u"From", u"To", u"Cc", u"Bcc", u"Subject"]:
+            tmp = []
+            matches = msg.get_all(k)
+            if matches is not None:
+                els = []
+                for m in matches:
+                    els += m.split(u",")
+                for el in els:
+                    v, cs = decode_header(el.strip())[0]
+                    if cs is None:
+                        cs = u"utf-8"
+                    tmp.append(unicode(v, cs))
+
+                t = k + u": "
+                r += [u"\n".join(textwrap.wrap(t + u", ".join(tmp),
+                                            width - 1,
+                                            subsequent_indent=u" " * len(t)))]
+
+        r += [u"", u""]
+
+        # Wrap the text properly.
+        for l in s.split(u"\n"):
+            r += [u"\n".join([unicode(nl, code)
+                                    for nl in textwrap.wrap(l.encode(code),
+                                                            width - 1)])]
+
+        return u"\n".join(r)
 
 
 class Mailbox(object):
@@ -363,17 +398,17 @@ class GMOTRApp(object):
         self._message_scroll_pos = 0
 
         contents = self.message.to_str(self.width)
-        self._nlines = len(contents.split(u"\n"))
+        self._nlines = len(contents.splitlines())
 
         self.messageview.erase()
         self.messageview.resize(max(self._nlines, self.height - 2),
                                 self.width)
 
-        self.messageview.addstr(0, 0, contents)
+        self.messageview.addstr(0, 0, contents.encode(code))
         self.scroll_message(0)
 
     def scroll_message(self, ind):
-        self._message_scroll_pos = min(self._nlines - 1, max(0,
+        self._message_scroll_pos = min(self._nlines - self.height + 2, max(0,
                                    self._message_scroll_pos + ind))
         self.messageview.refresh(self._message_scroll_pos, 0, 0, 0,
                                  self.height - 3, self.width)
