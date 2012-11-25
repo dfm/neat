@@ -224,7 +224,7 @@ class GmailAccount(object):
                                  + u"in mailbox: '{0}'\n".format(mb))
 
                 # Show the progress bar.
-                sys.stdout.write(u"| " + u"*" * nfilled
+                sys.stdout.write(u"| " + u"=" * nfilled
                                  + u"-" * (nbars - nfilled) + u" | ")
 
                 # Compute and display the approximate time remaining.
