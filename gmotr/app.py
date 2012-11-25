@@ -2,7 +2,11 @@
 
 import re
 import curses
+import textwrap
 from email.header import decode_header
+
+from datetime import datetime, timedelta, tzinfo
+import time as _time
 
 from imap_utils import GmailAccount
 
@@ -41,12 +45,12 @@ class MessageInfo(object):
     def sent(self):
         return u"\"\\\\Sent\"" in self.doc.get(u"labels")
 
-    def to_str(self, width, from_width=20):
-        s = u""
+    def to_str(self, width, from_width=25):
+        s = u" "
 
         # Flags and labels.
         if self.unread:
-            s += u"* "
+            s += u"o "
         else:
             s += u"  "
 
@@ -70,12 +74,28 @@ class MessageInfo(object):
         s += u"{{0:{0}s}}  ".format(from_width).format(from_str[:from_width])
 
         # Subject.
-        v, cs = decode_header(self.doc.get("subject", "(No subject)"))[0]
+        v, cs = decode_header(self.doc.get(u"subject", u"(No subject)"))[0]
         if cs is None:
             cs = u"utf-8"
         s += unicode(v.strip(), cs)
 
-        return s[:width - 1].encode("ascii", "replace")
+        s = s.encode(u"ascii", u"replace")
+
+        # Parse the date.
+        date = datetime.utcfromtimestamp(self.doc.get(u"time")) \
+                        .replace(tzinfo=UTC()).astimezone(LocalTimezone())
+        dt = datetime.now(UTC()) - date
+
+        if dt.days == 0 and dt.seconds < 43200:
+            date = date.strftime(u"%I:%M %p").lower().encode(u"ascii")
+            if date[0] == u"0":
+                date = date[1:]
+        else:
+            date = date.strftime(u"%b %d").encode(u"ascii")
+
+        # Compute the layout.
+        size = width - 2 - len(date)
+        return "{{0:{0}s}} {{1}}".format(size).format(s[:size], date)
 
     @property
     def color(self):
@@ -86,14 +106,75 @@ class MessageInfo(object):
         return curses.COLOR_BLACK
 
 
+class MessageDetail(object):
+
+    def __init__(self, doc):
+        self.doc = doc
+        self.info = MessageInfo(doc)
+
+    def to_str(self, width):
+        msg = self.doc.get(u"message", u"")
+
+        s = u""
+        for i, p in enumerate(msg.walk()):
+            ct = p.get_content_type()
+            if ct == "text/plain":
+                s += unicode(p.get_payload(decode=True), errors="replace")
+                s += u"\n\n"
+
+            elif u"multipart" not in ct:
+                s += u"=== Part {0}: Content-type: {1} ===\n\n\n".format(i + 1,
+                                                                        ct)
+
+        s = u"\n".join([u"\n".join(textwrap.wrap(l, width - 1))
+                       for l in s.split(u"\n")])
+
+        return s.encode("ascii", "replace")
+
+
+class Mailbox(object):
+
+    def __init__(self, acct):
+        self._acct = acct
+        self._messages = []
+
+        self.reset()
+
+    def reset(self):
+        self._selected = 0
+
+    def scroll(self, n):
+        self._selected = max(min(self._selected + n,
+                                 len(self._messages) - 1), 0)
+
+    def search(self, q=None):
+        self._messages = [MessageInfo(m) for m in acct.simple_list(q=q)]
+
+    def fetch_selected(self):
+        msg = self.selected
+        uid = msg.doc["uid"]
+        return MessageDetail(acct.fetch_message(uid))
+
+    @property
+    def selected(self):
+        return self._messages[self._selected]
+
+    def __getitem__(self, i):
+        return self._messages[i]
+
+    def __len__(self):
+        return len(self._messages)
+
+
 class GMOTRApp(object):
 
     def __init__(self, email_address, acct):
         self._email = email_address
-        self._acct = acct
-        self._messages = [MessageInfo(m) for m in acct.simple_list()]
+        self.mailbox = Mailbox(acct)
+        self.message = None
 
     def run(self):
+        self.mailbox.search()
         curses.wrapper(self)
 
     def __call__(self, screen):
@@ -115,6 +196,7 @@ class GMOTRApp(object):
         repeat = ""
 
         # Start the main event loop.
+        mode = "list"
         while 1:
             # Wait for a keystroke.
             c = self.listview.getch()
@@ -125,26 +207,52 @@ class GMOTRApp(object):
             except ValueError:
                 reps = 1
 
-            if c == ord("q"):
-                break
+            if mode == "list":
+                if c == ord("q"):
+                    break
 
-            elif c == ord("j") or c == curses.KEY_DOWN:
-                self.scroll(reps)
-                repeat = ""
+                elif c == ord("j") or c == curses.KEY_DOWN:
+                    self.scroll(reps)
 
-            elif c == ord("k") or c == curses.KEY_UP:
-                self.scroll(-reps)
-                repeat = ""
+                elif c == ord("k") or c == curses.KEY_UP:
+                    self.scroll(-reps)
 
-            elif c in range(ord("0"), ord("9")):
+                elif c == ord("\n"):
+                    mode = "message"
+                    self.update_toolbar("Fetching message...")
+                    curses.doupdate()
+                    self.message = self.mailbox.fetch_selected()
+                    self.update_toolbar("Complete.")
+                    self.display_selected()
+
+                elif c == ord(":"):
+                    q = self.get_input(u":")
+                    self.update_toolbar("Searching for: '{0}' ...".format(q))
+                    curses.doupdate()
+
+                    # Run the IMAP query.
+                    self.mailbox.search(q)
+
+                    # Display the results.
+                    self.update_toolbar("Found {0} results for: '{1}'"
+                                        .format(len(self.mailbox), q))
+                    self.update_listview()
+
+            elif mode == "message":
+
+                if c == ord("q"):
+                    mode = "list"
+                    self.scroll(0)
+
+                elif c == ord("j") or c == curses.KEY_DOWN:
+                    self.scroll_message(reps)
+
+                elif c == ord("k") or c == curses.KEY_UP:
+                    self.scroll_message(-reps)
+
+            if c in range(ord("0"), ord("9")):
                 repeat += chr(c)
                 self.update_statusbar(reps=repeat)
-
-            elif c == ord("/"):
-                q = self.get_input(u"/")
-                self._messages = [MessageInfo(m)
-                                        for m in acct.simple_list(q=q)]
-                self.update_listview()
 
             else:
                 repeat = ""
@@ -155,8 +263,12 @@ class GMOTRApp(object):
     def draw_windows(self):
         self.height, self.width = self.screen.getmaxyx()
 
+        # Draw the message display view.
+        self.messageview = curses.newpad(self.height - 3, self.width)
+        self.messageview.keypad(1)
+
         # Draw the list view.
-        self.listview = curses.newpad(len(self._messages), self.width)
+        self.listview = curses.newpad(self.height - 3, self.width)
         self.listview.keypad(1)
         self.update_listview()
 
@@ -177,7 +289,6 @@ class GMOTRApp(object):
         if reps is not None:
             reps = str(reps)
             self.statusbar.addstr(0, self.width - len(reps) - 1, reps)
-
         self.statusbar.noutrefresh()
 
     def update_toolbar(self, contents=u""):
@@ -186,15 +297,15 @@ class GMOTRApp(object):
         self.toolbar.noutrefresh()
 
     def update_listview(self):
-        self._selected = 0
+        self.mailbox.reset()
         self._scroll_pos = 0
 
         self.listview.erase()
-        self.listview.resize(max(len(self._messages), self.height - 3),
+        self.listview.resize(max(len(self.mailbox), self.height - 2),
                              self.width)
 
         self._rows = []
-        for i, msg in enumerate(self._messages):
+        for i, msg in enumerate(self.mailbox):
             row = self.listview.subwin(1, self.width, i, 0)
 
             if msg.unread:
@@ -209,8 +320,8 @@ class GMOTRApp(object):
 
     def scroll(self, ind):
         # Remove the styling from the previously selected row.
-        row = self._rows[self._selected]
-        msg = self._messages[self._selected]
+        row = self._rows[self.mailbox._selected]
+        msg = self.mailbox.selected
 
         if msg.unread:
             row.bkgd(" ", curses.color_pair(2))
@@ -220,20 +331,19 @@ class GMOTRApp(object):
             row.bkgd(" ")
 
         # Compute the new selection.
-        self._selected = max(min(self._selected + ind,
-                                 len(self._messages) - 1), 0)
+        self.mailbox.scroll(ind)
 
         # Add the styles to the new selection.
-        row = self._rows[self._selected]
+        row = self._rows[self.mailbox._selected]
         row.bkgd(" ", curses.color_pair(3))
 
         # Update the scroll position if needed.
-        if self._selected - self._scroll_pos >= self.height - 3:
-            self._scroll_pos = self._selected - self.height + 3
-        elif self._selected - self._scroll_pos < 0:
-            self._scroll_pos = self._selected
+        if self.mailbox._selected - self._scroll_pos >= self.height - 3:
+            self._scroll_pos = self.mailbox._selected - self.height + 3
+        elif self.mailbox._selected - self._scroll_pos < 0:
+            self._scroll_pos = self.mailbox._selected
 
-        self.listview.refresh(self._scroll_pos, 0, 0, 0,
+        self.listview.noutrefresh(self._scroll_pos, 0, 0, 0,
                               self.height - 3, self.width)
 
     def get_input(self, msg):
@@ -247,6 +357,78 @@ class GMOTRApp(object):
         curses.curs_set(0)
 
         return result
+
+    def display_selected(self):
+        # self.mailbox.reset()
+        self._message_scroll_pos = 0
+
+        contents = self.message.to_str(self.width)
+        self._nlines = len(contents.split(u"\n"))
+
+        self.messageview.erase()
+        self.messageview.resize(max(self._nlines, self.height - 2),
+                                self.width)
+
+        self.messageview.addstr(0, 0, contents)
+        self.scroll_message(0)
+
+    def scroll_message(self, ind):
+        self._message_scroll_pos = min(self._nlines - 1, max(0,
+                                   self._message_scroll_pos + ind))
+        self.messageview.refresh(self._message_scroll_pos, 0, 0, 0,
+                                 self.height - 3, self.width)
+
+
+#
+# TIMEZONE HACKS.
+#
+
+STDOFFSET = timedelta(seconds=-_time.timezone)
+if _time.daylight:
+    DSTOFFSET = timedelta(seconds=-_time.altzone)
+else:
+    DSTOFFSET = STDOFFSET
+
+DSTDIFF = DSTOFFSET - STDOFFSET
+ZERO = timedelta(0)
+
+
+class UTC(tzinfo):
+
+    def utcoffset(self, dt):
+        return ZERO
+
+    def tzname(self, dt):
+        return u"UTC"
+
+    def dst(self, dt):
+        return ZERO
+
+
+class LocalTimezone(tzinfo):
+
+    def utcoffset(self, dt):
+        if self._isdst(dt):
+            return DSTOFFSET
+        else:
+            return STDOFFSET
+
+    def dst(self, dt):
+        if self._isdst(dt):
+            return DSTDIFF
+        else:
+            return ZERO
+
+    def tzname(self, dt):
+        return _time.tzname[self._isdst(dt)]
+
+    def _isdst(self, dt):
+        tt = (dt.year, dt.month, dt.day,
+              dt.hour, dt.minute, dt.second,
+              dt.weekday(), 0, 0)
+        stamp = _time.mktime(tt)
+        tt = _time.localtime(stamp)
+        return tt.tm_isdst > 0
 
 
 if __name__ == "__main__":

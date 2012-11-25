@@ -156,27 +156,26 @@ class GmailAccount(object):
 
     def simple_list(self, q=None):
         with self._imap as c:
-            # Select the IMAP mailbox.
             if q is None:
-                code, count = c.select("INBOX", readonly=True)
-                if code != u"OK":
-                    raise IMAPSyncError(u"Couldn't SELECT 'INBOX' ({1})"
-                                        .format(code))
+                q = u"in:inbox"
 
-                uids = u"1:*"
-            else:
-                code, count = c.select("[Gmail]/All Mail", readonly=True)
+            code, count = c.select("[Gmail]/All Mail", readonly=True)
+            if code != u"OK":
+                raise IMAPSyncError(u"Couldn't SELECT 'All Mail' ({1})"
+                                    .format(code))
 
-                code, uids = c.uid(u"search", None,
-                                   u"X-GM-RAW", u"\"{0}\"".format(q))
-                uids = u",".join(uids[0].split())
-                if code != u"OK":
-                    raise IMAPSyncError(u"Couldn't run query '{0}' ({1})"
-                                        .format(q, code))
+            code, uids = c.uid(u"search", None,
+                                u"X-GM-RAW", u"\"{0}\"".format(q))
+
+            if code != u"OK":
+                raise IMAPSyncError(u"Couldn't run query '{0}' ({1})"
+                                    .format(q, code))
+
+            uids = u",".join(uids[0].split())
 
             code, data = c.uid(u"fetch", uids,
                                u"(BODY.PEEK[HEADER.FIELDS "
-                               u"(Subject From To)] "
+                               u"(Subject From To Date)] "
                                u"X-GM-MSGID X-GM-THRID X-GM-LABELS "
                                u"FLAGS INTERNALDATE)")
 
@@ -197,6 +196,35 @@ class GmailAccount(object):
                     results.append(doc)
 
             return sorted(results, reverse=True, key=lambda d: d["time"])
+
+    def fetch_message(self, uid):
+        with self._imap as c:
+            # Select the IMAP mailbox.
+            code, count = c.select("[Gmail]/All Mail", readonly=True)
+            if code != u"OK":
+                raise IMAPSyncError(u"Couldn't SELECT 'All Mail' ({1})"
+                                    .format(code))
+
+            code, data = c.uid(u"fetch", unicode(uid),
+                               u"(BODY.PEEK[] "
+                               u"X-GM-MSGID X-GM-THRID X-GM-LABELS "
+                               u"FLAGS INTERNALDATE)")
+
+            if code != "OK":
+                raise IMAPSyncError(u"Couldn't FETCH body.")
+
+            doc = dict(zip([u"msgid", u"thrid", u"labels", u"flags", u"uid"],
+                           self._do_header_parse(data[0][0])))
+            for k, val in self.parse_header.findall(data[0][0]):
+                doc[k.strip().lower()] = val.strip()
+
+            doc["time"] = time.mktime(imaplib.Internaldate2tuple(data[0][0]))
+            doc["message"] = email.message_from_string(data[0][1])
+
+            for k in ["from", "to", "subject"]:
+                doc[k] = ",".join(doc["message"].get_all(k))
+
+            return doc
 
     def _fetch(self, mb, mbname):
         """
