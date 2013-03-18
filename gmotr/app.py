@@ -116,8 +116,39 @@ class MessageDetail(object):
         self.doc = doc
         self.info = MessageInfo(doc)
 
+    def get_header(self, width=None):
+        msg = self.doc.get(u"message")
+
+        r = []
+        for k in [u"From", u"To", u"Cc", u"Bcc", u"Subject"]:
+            tmp = []
+            matches = msg.get_all(k)
+            if matches is not None:
+                els = []
+                for m in matches:
+                    els += m.split(u",")
+                for el in els:
+                    v, cs = decode_header(el.strip())[0]
+                    if cs is None:
+                        cs = u"utf-8"
+
+                    if k != u"Subject":
+                        v, em = self.info.parse_email(v)
+
+                    tmp.append(unicode(v, cs))
+
+                t = k + u": "
+                r += [u"\n".join([unicode(nl, code)
+                        for nl in textwrap.wrap((t + u", ".join(tmp))
+                                                    .encode(code),
+                                                width - 1,
+                                                subsequent_indent=(u" "
+                                                    * len(t)).encode(code))])]
+
+        return u"\n".join(r)
+
     def to_str(self, width):
-        msg = self.doc.get(u"message", u"")
+        msg = self.doc.get(u"message")
 
         # Iterate through the parts and deal with encodings.
         s = u""
@@ -136,28 +167,6 @@ class MessageDetail(object):
                                                                         ct)
 
         r = []
-
-        # Build the header.
-        for k in [u"From", u"To", u"Cc", u"Bcc", u"Subject"]:
-            tmp = []
-            matches = msg.get_all(k)
-            if matches is not None:
-                els = []
-                for m in matches:
-                    els += m.split(u",")
-                for el in els:
-                    v, cs = decode_header(el.strip())[0]
-                    if cs is None:
-                        cs = u"utf-8"
-                    tmp.append(unicode(v, cs))
-
-                t = k + u": "
-                r += [u"\n".join(textwrap.wrap(t + u", ".join(tmp),
-                                            width - 1,
-                                            subsequent_indent=u" " * len(t)))]
-
-        r += [u"", u""]
-
         # Wrap the text properly.
         for l in s.split(u"\n"):
             r += [u"\n".join([unicode(nl, code)
@@ -217,6 +226,7 @@ class GMOTRApp(object):
         curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLACK)
         curses.init_pair(2, curses.COLOR_BLACK, curses.COLOR_CYAN)
         curses.init_pair(3, curses.COLOR_BLACK, curses.COLOR_YELLOW)
+        curses.init_pair(4, curses.COLOR_BLUE, curses.COLOR_BLACK)
         curses.curs_set(0)
 
         # Save a reference to the main screen.
@@ -397,14 +407,18 @@ class GMOTRApp(object):
         # self.mailbox.reset()
         self._message_scroll_pos = 0
 
+        header = self.message.get_header(width=self.width)
+        nheader = len(header.split(u"\n"))
         contents = self.message.to_str(self.width)
-        self._nlines = len(contents.splitlines())
+        self._nlines = 2 + nheader + len(contents.split(u"\n"))
 
         self.messageview.erase()
         self.messageview.resize(max(self._nlines, self.height - 2),
                                 self.width)
 
-        self.messageview.addstr(0, 0, contents.encode(code))
+        self.messageview.addstr(0, 0, header.encode(code),
+                                curses.color_pair(4))
+        self.messageview.addstr(nheader + 2, 0, contents.encode(code))
         self.scroll_message(0)
 
     def scroll_message(self, ind):
