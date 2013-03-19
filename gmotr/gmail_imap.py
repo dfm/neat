@@ -4,9 +4,12 @@ __all__ = []
 
 
 import re
+import time
+from datetime import datetime
 import socket
 import imaplib
 from email.parser import Parser
+from email.header import decode_header
 import getpass
 import logging
 
@@ -69,7 +72,7 @@ class GmailIMAPAccount(object):
         self.password = pw
         return self.password
 
-    def list_remote(self, mb="[Gmail]/All Mail", q="in:inbox"):
+    def list_remote(self, mb="[Gmail]/All Mail", q=""):
         with self.imap as c:
             # Select the requested mailbox.
             code, count = c.select(mailbox="\"{}\"".format(mb), readonly=True)
@@ -88,10 +91,13 @@ class GmailIMAPAccount(object):
             if len(uids) == 0:
                 return []
 
+            # Limit to the N most recent messages.
+            if len(uids) > 10:
+                uids = uids[-10:]
+
             # Get the information about the messages.
             code, data = c.uid("fetch", ",".join(uids),
                                "(BODY.PEEK[HEADER] "
-                               # "(Subject From To Date)] "
                                "X-GM-MSGID X-GM-THRID X-GM-LABELS "
                                "FLAGS INTERNALDATE)")
             if code != "OK":
@@ -103,17 +109,52 @@ class GmailIMAPAccount(object):
             parser = Parser()
             for m in data[::2]:
                 headers = parser.parsestr(m[1].decode("utf-8"))
-                print(parse_imap_header(m[0].decode("utf-8")))
+                parameters = parse_imap_header(m[0].decode("utf-8"))
+
+                for h in headers:
+                    print(decode_header(headers.get_all(h)))
+                    # parameters[h.lower()] =
+
+                s, enc = decode_header(headers["subject"])[0]
+                if enc is not None:
+                    print(s.decode(enc))
+
+
+_imap_header_re = re.compile(r"(?:([A-Z\-]+?) \((.*?)\))"
+                             r"|(?:([A-Z\-]+?) \"(.*?)\")"
+                             r"|(?:([A-Z\-]+?) (\S+?)\b)")
+_imap_header_list_re = re.compile(r"((?:\"(?:.+?)\")|(?:(?:\S+)))")
 
 
 def parse_imap_header(hdr):
+    # Skip the prefix.
     ind = hdr.index("(")
-    print(hdr[ind + 1:])
-    results = re.findall(r"(?:(\S+?) \((.+?)\))"
-                         r"|(?:(\S+?) \"(.+?)\")"
-                         r"|(?:(\S+?) (\S+?)\b)", hdr[ind + 1:])
-    print(results)
-    return None
+
+    # Find all the parameter groups.
+    groups = _imap_header_re.findall(hdr[ind + 1:])
+
+    # Parse through the list to find the non-empty results.
+    results = {}
+    for r in groups:
+        if r[0] != "":
+            # Lists are surrounded in parens, split the list here.
+            li = _imap_header_list_re.findall(r[1])
+            results[r[0]] = [l.strip("\"") for l in li]
+        elif r[2] != "":
+            results[r[2]] = r[3]
+        elif r[4] != "":
+            results[r[4]] = r[5]
+
+    # Parse the INTERNALDATE parameter to a ``datetime`` object.
+    if "INTERNALDATE" in results:
+        dt = "INTERNALDATE \"{}\"".format(results.pop("INTERNALDATE"))
+        tpl = imaplib.Internaldate2tuple(dt.encode("utf-8"))
+        if tpl is None:
+            results["INTERNALDATE"] = None
+        else:
+            results["INTERNALDATE"] = datetime.fromtimestamp(time.mktime(tpl))
+
+    return results
 
 
 class IMAPConnection(object):
@@ -147,4 +188,6 @@ class IMAPSyncError(Exception):
 
 if __name__ == "__main__":
     gm = GmailIMAPAccount("foreman.mackey@gmail.com")
+    strt = time.time()
     gm.list_remote()
+    print(time.time() - strt)
