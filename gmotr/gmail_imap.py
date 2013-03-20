@@ -92,12 +92,13 @@ class GmailIMAPAccount(object):
                 return []
 
             # Limit to the N most recent messages.
-            if len(uids) > 10:
-                uids = uids[-10:]
+            if len(uids) > 100:
+                uids = uids[-100:]
 
             # Get the information about the messages.
             code, data = c.uid("fetch", ",".join(uids),
-                               "(BODY.PEEK[HEADER] "
+                               "(BODY.PEEK[HEADER.FIELDS "
+                               "(Subject From To Cc Bcc Date)] "
                                "X-GM-MSGID X-GM-THRID X-GM-LABELS "
                                "FLAGS INTERNALDATE)")
             if code != "OK":
@@ -112,12 +113,12 @@ class GmailIMAPAccount(object):
                 parameters = parse_imap_header(m[0].decode("utf-8"))
 
                 for h in headers:
-                    print(decode_header(headers.get_all(h)))
-                    # parameters[h.lower()] =
+                    t, enc = decode_header("".join(headers.get_all(h)))[0]
+                    if enc is not None:
+                        t = t.decode(enc)
+                    parameters[h] = t
 
-                s, enc = decode_header(headers["subject"])[0]
-                if enc is not None:
-                    print(s.decode(enc))
+                print(parameters)
 
 
 _imap_header_re = re.compile(r"(?:([A-Z\-]+?) \((.*?)\))"
