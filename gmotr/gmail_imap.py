@@ -15,6 +15,8 @@ import logging
 
 import keyring
 
+from . import models
+
 
 class GmailIMAPAccount(object):
 
@@ -46,6 +48,11 @@ class GmailIMAPAccount(object):
         except socket.error as e:
             logging.error("The network connection failed.")
             raise e
+
+        session = models.Session()
+        self.account = session.query(models.GmailAccount).filter(
+            models.GmailAccount.email == self.email).first()
+        session.close()
 
     def get_password(self, force=False):
         """
@@ -105,20 +112,68 @@ class GmailIMAPAccount(object):
                 raise IMAPSyncError("Couldn't fetch info for messages ({})"
                                     .format(code))
 
-            # Parse the returned data.
-            results = []
+            # Parse the returned data and submit them to the DB session.
+            session = models.Session()
             parser = Parser()
             for m in data[::2]:
                 headers = parser.parsestr(m[1].decode("utf-8"))
-                parameters = parse_imap_header(m[0].decode("utf-8"))
+                parameters = parse_imap_parameters(m[0].decode("utf-8"))
 
-                for h in headers:
-                    t, enc = decode_header("".join(headers.get_all(h)))[0]
-                    if enc is not None:
-                        t = t.decode(enc)
-                    parameters[h] = t
+                # Resolve duplicate email addresses.
+                from_email = _decode(headers.get("From"))
+                to_emails = [_decode(h) for h in headers.getall("To")]
+                cc_emails = [_decode(h) for h in headers.getall("Cc")]
+                bcc_emails = [_decode(h) for h in headers.getall("Bcc")]
+                emails = [_decode(e) for e in [from_email] + to_emails
+                          + cc_emails + bcc_emails]
 
-                print(parameters)
+                emails = dict(session.query(models.GmailAddress.raw,
+                                            models.GmailAddress)
+                              .filter(models.GmailAddress.raw.in_(emails)))
+
+                from_email = emails.get(from_email,
+                                        models.GmailAddress(from_email))
+                to_emails = [emails.get(e, models.GmailAddress(e))
+                             for e in to_emails]
+                cc_emails = [emails.get(e, models.GmailAddress(e))
+                             for e in cc_emails]
+                bcc_emails = [emails.get(e, models.GmailAddress(e))
+                              for e in bcc_emails]
+
+                # Resolve duplicates in flags and labels.
+                flags = parameters.get("FLAGS", [])
+                if len(flags) > 0:
+                    all_flags = dict(session.query(models.GmailFlag.name,
+                                                   models.GmailFlag)
+                                     .filter(models.GmailFlag.name.in_(flags)))
+                    flags = [all_flags.get(f, models.GmailFlag(f))
+                             for f in flags]
+
+                labels = parameters.get("X-GM-LABELS", [])
+                if len(labels) > 0:
+                    all_labels = dict(session.query(models.GmailLabel.name,
+                                                    models.GmailLabel)
+                                      .filter(models.GmailLabel.name.in_(
+                                          labels)))
+                    labels = [all_labels.get(l, models.GmailLabel(l))
+                              for l in labels]
+
+                msg = models.GmailMessage(parameters["UID"],
+                                          parameters["X-GM-MSGID"],
+                                          parameters["X-GM-THRID"],
+                                          self.account,
+                                          parameters["INTERNALDATE"],
+                                          _decode(headers.get("Date")),
+                                          from_email,
+                                          to_emails,
+                                          cc_emails,
+                                          bcc_emails,
+                                          flags,
+                                          labels)
+
+                session.add(msg)
+
+            session.commit()
 
 
 _imap_header_re = re.compile(r"(?:([A-Z\-]+?) \((.*?)\))"
@@ -127,7 +182,7 @@ _imap_header_re = re.compile(r"(?:([A-Z\-]+?) \((.*?)\))"
 _imap_header_list_re = re.compile(r"((?:\"(?:.+?)\")|(?:(?:\S+)))")
 
 
-def parse_imap_header(hdr):
+def parse_imap_parameters(hdr):
     # Skip the prefix.
     ind = hdr.index("(")
 
@@ -158,6 +213,13 @@ def parse_imap_header(hdr):
     return results
 
 
+def _decode(h):
+    t, enc = decode_header(h)[0]
+    if enc is not None:
+        t = t.decode(enc)
+    return t
+
+
 class IMAPConnection(object):
     """
     A wrapper around an :class:`imaplib.IMAP4_SSL` object that allows it to
@@ -185,10 +247,3 @@ class IMAPAuthError(Exception):
 
 class IMAPSyncError(Exception):
     pass
-
-
-if __name__ == "__main__":
-    gm = GmailIMAPAccount("foreman.mackey@gmail.com")
-    strt = time.time()
-    gm.list_remote()
-    print(time.time() - strt)
