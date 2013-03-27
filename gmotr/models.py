@@ -74,9 +74,9 @@ class GmailMessage(Base):
     __tablename__ = "messages"
 
     id = Column(Integer, primary_key=True)
-    uid = Column(Integer, unique=True)
-    message_id = Column(Integer, unique=True)
-    thread_id = Column(Integer, unique=True)
+    uid = Column(String)
+    message_id = Column(String)
+    thread_id = Column(String)
 
     account_id = Column(Integer, ForeignKey("accounts.id"))
     account = relationship("GmailAccount", backref=backref("messages"))
@@ -99,9 +99,9 @@ class GmailMessage(Base):
     def __init__(self, uid, message_id, thread_id, account, internaldate,
                  date, subject, from_address, to_addresses, cc_addresses,
                  bcc_addresses, flags, labels, body=None):
-        self.uid = int(uid)
-        self.message_id = int(message_id)
-        self.thread_id = int(thread_id)
+        self.uid = uid
+        self.message_id = message_id
+        self.thread_id = thread_id
 
         self.account = account
 

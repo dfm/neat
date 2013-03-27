@@ -121,9 +121,18 @@ class GmailIMAPAccount(object):
 
                 # Resolve duplicate email addresses.
                 from_email = _decode(headers.get("From"))
-                to_emails = [_decode(h) for h in headers.getall("To")]
-                cc_emails = [_decode(h) for h in headers.getall("Cc")]
-                bcc_emails = [_decode(h) for h in headers.getall("Bcc")]
+                if "To" in headers:
+                    to_emails = [_decode(h) for h in headers.get_all("To")]
+                else:
+                    to_emails = []
+                if "Cc" in headers:
+                    cc_emails = [_decode(h) for h in headers.get_all("Cc")]
+                else:
+                    cc_emails = []
+                if "Bcc" in headers:
+                    bcc_emails = [_decode(h) for h in headers.get_all("Bcc")]
+                else:
+                    bcc_emails = []
                 emails = [_decode(e) for e in [from_email] + to_emails
                           + cc_emails + bcc_emails]
 
@@ -164,6 +173,7 @@ class GmailIMAPAccount(object):
                                           self.account,
                                           parameters["INTERNALDATE"],
                                           _decode(headers.get("Date")),
+                                          _decode(headers.get("Subject")),
                                           from_email,
                                           to_emails,
                                           cc_emails,
@@ -214,9 +224,10 @@ def parse_imap_parameters(hdr):
 
 
 def _decode(h):
-    t, enc = decode_header(h)[0]
+    t, enc = decode_header(str(h))[0]
     if enc is not None:
         t = t.decode(enc)
+    print(t)
     return t
 
 
