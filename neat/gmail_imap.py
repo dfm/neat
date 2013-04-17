@@ -2,7 +2,6 @@
 
 __all__ = []
 
-
 import re
 import time
 from datetime import datetime
@@ -16,6 +15,14 @@ import logging
 import keyring
 
 from . import models
+
+
+list_re = re.compile(r"\((?P<flags>.*?)\) \"(?P<delimiter>.*)\" (?P<name>.*)")
+
+
+def parse_mbname(txt):
+    flags, delim, mbname = list_re.match(txt).groups()
+    return flags.split(), mbname.strip().strip("\"")
 
 
 class GmailIMAPAccount(object):
@@ -227,7 +234,6 @@ def _decode(h):
     t, enc = decode_header(str(h))[0]
     if enc is not None:
         t = t.decode(enc)
-    print(t)
     return t
 
 

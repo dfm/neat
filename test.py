@@ -4,8 +4,8 @@
 from __future__ import (division, print_function, absolute_import,
                         unicode_literals)
 import time
-from gmotr.gmail_imap import GmailIMAPAccount
-import gmotr.models as models
+from neat.gmail_imap import GmailIMAPAccount
+import neat.models as models
 
 
 if __name__ == "__main__":
